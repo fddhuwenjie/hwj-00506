@@ -133,6 +133,50 @@ db.serialize(() => {
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (order_id) REFERENCES repair_orders(id) ON DELETE CASCADE
   )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS settlement_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    settlement_id INTEGER NOT NULL,
+    adjustment_amount REAL NOT NULL,
+    adjustment_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (settlement_id) REFERENCES settlements(id) ON DELETE CASCADE
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS inventory_deduction_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    settlement_id INTEGER NOT NULL,
+    part_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    unit_price REAL NOT NULL,
+    subtotal REAL NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (settlement_id) REFERENCES settlements(id) ON DELETE CASCADE,
+    FOREIGN KEY (part_id) REFERENCES parts(id)
+  )`);
+
+  db.all(`PRAGMA table_info(settlements)`, (err, rows) => {
+    if (err) return;
+    const cols = rows.map(r => r.name);
+    if (!cols.includes('is_locked')) {
+      db.run(`ALTER TABLE settlements ADD COLUMN is_locked INTEGER DEFAULT 0`);
+    }
+    if (!cols.includes('original_receivable')) {
+      db.run(`ALTER TABLE settlements ADD COLUMN original_receivable REAL DEFAULT 0`);
+    }
+  });
+
+  db.all(`PRAGMA table_info(payment_records)`, (err, rows) => {
+    if (err) return;
+    const cols = rows.map(r => r.name);
+    if (!cols.includes('idempotency_key')) {
+      db.run(`ALTER TABLE payment_records ADD COLUMN idempotency_key TEXT`);
+    }
+  });
 });
 
 function generateOrderNo() {
@@ -387,9 +431,20 @@ app.delete('/api/repair-orders/:id/parts/:pid', (req, res) => {
 
 app.put('/api/repair-orders/:id/status', (req, res) => {
   const { status } = req.body;
-  db.run('UPDATE repair_orders SET status = ? WHERE id = ?', [status, req.params.id], function(err) {
+  const oid = req.params.id;
+  db.get('SELECT status FROM repair_orders WHERE id = ?', [oid], (err, order) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.json({ changes: this.changes });
+    if (!order) return res.status(404).json({ error: '工单不存在' });
+    if (order.status === 'completed' && (status === 'pending_settlement' || status === 'in_repair' || status === 'pending_diagnosis')) {
+      return res.status(400).json({ error: '已完成工单禁止回退为待结算/维修中/待诊断状态。如需调整金额，请通过「结算调整单」办理。' });
+    }
+    if (order.status === 'completed' && status === 'completed') {
+      return res.json({ changes: 0, message: '状态未变化' });
+    }
+    db.run('UPDATE repair_orders SET status = ? WHERE id = ?', [status, oid], function(err) {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ changes: this.changes });
+    });
   });
 });
 
@@ -455,11 +510,20 @@ app.post('/api/settlements', (req, res) => {
   const { order_id, discount } = req.body;
   const oid = order_id;
 
-  db.get(`SELECT ro.labor_fee, ro.status FROM repair_orders ro WHERE ro.id = ?`, [oid], (err, order) => {
+  db.get(`SELECT ro.labor_fee, ro.status, s.id as settlement_id, s.is_locked, s.debt_status
+          FROM repair_orders ro
+          LEFT JOIN settlements s ON s.order_id = ro.id
+          WHERE ro.id = ?`, [oid], (err, order) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!order) return res.status(404).json({ error: '工单不存在' });
     if (order.status !== 'pending_settlement' && order.status !== 'completed') {
       return res.status(400).json({ error: '工单状态不允许结算' });
+    }
+    if (order.settlement_id && order.is_locked) {
+      return res.status(400).json({ error: '结算单已锁定，禁止重复生成或修改。如需调整金额，请通过「结算调整单」办理。', locked: true });
+    }
+    if (order.debt_status === 'paid' || order.status === 'completed') {
+      return res.status(400).json({ error: '工单已完成/已结清，结算单已锁定，禁止重新生成。如需调整金额，请通过「结算调整单」办理。', locked: true });
     }
     db.all(`SELECT op.part_id, op.quantity, p.stock FROM order_parts op LEFT JOIN parts p ON op.part_id = p.id WHERE op.order_id = ?`, [oid], (err, orderParts) => {
       if (err) return res.status(500).json({ error: err.message });
@@ -478,16 +542,30 @@ app.post('/api/settlements', (req, res) => {
         const laborTotal = order.labor_fee;
         const disc = discount || 0;
         const receivable = laborTotal + partsTotal - disc;
-        db.run(`INSERT OR REPLACE INTO settlements (order_id, labor_total, parts_total, discount, receivable_amount, paid_amount, debt_status)
-                VALUES (?, ?, ?, ?, ?, COALESCE((SELECT paid_amount FROM settlements WHERE order_id = ?), 0),
-                CASE WHEN COALESCE((SELECT paid_amount FROM settlements WHERE order_id = ?), 0) >= ? THEN 'paid' ELSE 'unpaid' END)`,
-          [oid, laborTotal, partsTotal, disc, receivable, oid, oid, receivable],
-          function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            db.run('UPDATE repair_orders SET status = ? WHERE id = ?', ['pending_settlement', oid]);
-            res.json({ order_id: oid, labor_total: laborTotal, parts_total: partsTotal, discount: disc, receivable_amount: receivable });
-          }
-        );
+        if (order.settlement_id) {
+          db.run(`UPDATE settlements SET labor_total=?, parts_total=?, discount=?, receivable_amount=?,
+                  original_receivable=?
+                  WHERE id=? AND is_locked=0`,
+            [laborTotal, partsTotal, disc, receivable, receivable, order.settlement_id],
+            function(err) {
+              if (err) return res.status(500).json({ error: err.message });
+              if (this.changes === 0) {
+                return res.status(400).json({ error: '结算单已锁定，禁止修改。如需调整金额，请通过「结算调整单」办理。', locked: true });
+              }
+              res.json({ order_id: oid, labor_total: laborTotal, parts_total: partsTotal, discount: disc, receivable_amount: receivable, updated: true });
+            }
+          );
+        } else {
+          db.run(`INSERT INTO settlements (order_id, labor_total, parts_total, discount, receivable_amount, original_receivable, paid_amount, debt_status, is_locked)
+                  VALUES (?, ?, ?, ?, ?, ?, 0, 'unpaid', 0)`,
+            [oid, laborTotal, partsTotal, disc, receivable, receivable],
+            function(err) {
+              if (err) return res.status(500).json({ error: err.message });
+              db.run('UPDATE repair_orders SET status = ? WHERE id = ? AND status != ?', ['pending_settlement', oid, 'completed']);
+              res.json({ order_id: oid, labor_total: laborTotal, parts_total: partsTotal, discount: disc, receivable_amount: receivable, created: true });
+            }
+          );
+        }
       });
     });
   });
@@ -503,58 +581,253 @@ app.get('/api/settlements/:orderId', (req, res) => {
     if (!settle) return res.status(404).json({ error: '结算单不存在' });
     db.all('SELECT * FROM payment_records WHERE settlement_id = ? ORDER BY payment_time DESC', [settle.id], (err, payments) => {
       if (err) return res.status(500).json({ error: err.message });
-      db.get('SELECT * FROM reviews WHERE order_id = ?', [req.params.orderId], (err, review) => {
-        res.json({ ...settle, payments, review });
+      db.all(`SELECT sa.* FROM settlement_adjustments sa WHERE sa.settlement_id = ? ORDER BY sa.created_at DESC`, [settle.id], (err, adjustments) => {
+        if (err) return res.status(500).json({ error: err.message });
+        db.all(`SELECT idr.*, p.name as part_name, p.sku
+                FROM inventory_deduction_records idr
+                LEFT JOIN parts p ON idr.part_id = p.id
+                WHERE idr.settlement_id = ?
+                ORDER BY idr.created_at DESC`, [settle.id], (err, deductionRecords) => {
+          if (err) return res.status(500).json({ error: err.message });
+          db.get('SELECT * FROM reviews WHERE order_id = ?', [req.params.orderId], (err, review) => {
+            const originalReceivable = settle.original_receivable || settle.receivable_amount;
+            const totalAdjustment = (adjustments || []).reduce((sum, a) => sum + (a.adjustment_amount || 0), 0);
+            res.json({
+              ...settle,
+              original_receivable: originalReceivable,
+              total_adjustment: totalAdjustment,
+              payments,
+              adjustments,
+              deduction_records: deductionRecords,
+              review
+            });
+          });
+        });
       });
     });
   });
 });
 
 app.post('/api/settlements/:orderId/pay', (req, res) => {
-  const { amount, payment_method, remark } = req.body;
+  const { amount, payment_method, remark, idempotency_key } = req.body;
   const payAmount = parseFloat(amount);
   if (isNaN(payAmount) || payAmount <= 0) {
     return res.status(400).json({ error: '请输入有效收款金额' });
   }
+  const idempKey = idempotency_key || `pay_${req.params.orderId}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
   db.get('SELECT * FROM settlements WHERE order_id = ?', [req.params.orderId], (err, settle) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!settle) return res.status(404).json({ error: '结算单不存在' });
-    if (settle.debt_status === 'paid') {
-      return res.status(400).json({ error: '该工单已全部结清，不可继续收款' });
-    }
-    const unpaid = (settle.receivable_amount || 0) - (settle.paid_amount || 0);
-    if (payAmount > unpaid + 0.01) {
-      return res.status(400).json({ error: `收款金额超出欠款金额（最多可收 ¥${unpaid.toFixed(2)}）` });
-    }
-    const wasPaid = settle.debt_status === 'paid';
-    const newPaid = (settle.paid_amount || 0) + payAmount;
-    const debtStatus = newPaid >= settle.receivable_amount - 0.01 ? 'paid' : (newPaid > 0 ? 'partial' : 'unpaid');
-    const justFullyPaid = !wasPaid && debtStatus === 'paid';
-    db.run('INSERT INTO payment_records (settlement_id, amount, payment_method, remark) VALUES (?, ?, ?, ?)',
-      [settle.id, payAmount, payment_method || '现金', remark || ''],
-      function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        db.run('UPDATE settlements SET paid_amount = ?, debt_status = ? WHERE id = ?',
-          [newPaid, debtStatus, settle.id],
-          function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            if (justFullyPaid) {
-              db.run('UPDATE repair_orders SET status = ? WHERE id = ? AND status != ?',
-                ['completed', req.params.orderId, 'completed']);
-              db.all(`SELECT op.part_id, op.quantity FROM order_parts op WHERE op.order_id = ?`, [req.params.orderId], (err, ops) => {
-                if (!err && ops) {
-                  ops.forEach(op => {
-                    db.run('UPDATE parts SET stock = stock - ? WHERE id = ? AND stock >= ?',
-                      [op.quantity, op.part_id, op.quantity]);
-                  });
-                }
+
+    db.get('SELECT * FROM payment_records WHERE idempotency_key = ?', [idempKey], (err, existingPay) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (existingPay) {
+        return res.json({
+          ok: true,
+          idempotent: true,
+          payment_id: existingPay.id,
+          paid_amount: settle.paid_amount,
+          debt_status: settle.debt_status,
+          message: '幂等命中，该收款已处理'
+        });
+      }
+
+      if (settle.debt_status === 'paid') {
+        return res.status(400).json({ error: '该工单已全部结清，不可继续收款' });
+      }
+      const unpaid = (settle.receivable_amount || 0) - (settle.paid_amount || 0);
+      if (payAmount > unpaid + 0.01) {
+        return res.status(400).json({ error: `收款金额超出欠款金额（最多可收 ¥${unpaid.toFixed(2)}）` });
+      }
+      const wasPaid = settle.debt_status === 'paid';
+      const newPaid = (settle.paid_amount || 0) + payAmount;
+      const debtStatus = newPaid >= settle.receivable_amount - 0.01 ? 'paid' : (newPaid > 0 ? 'partial' : 'unpaid');
+      const justFullyPaid = !wasPaid && debtStatus === 'paid';
+
+      db.run('BEGIN TRANSACTION');
+      db.run('INSERT INTO payment_records (settlement_id, amount, payment_method, remark, idempotency_key) VALUES (?, ?, ?, ?, ?)',
+        [settle.id, payAmount, payment_method || '现金', remark || '', idempKey],
+        function(err) {
+          if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+          const payRecordId = this.lastID;
+          const isLocked = justFullyPaid ? 1 : settle.is_locked;
+          db.run('UPDATE settlements SET paid_amount = ?, debt_status = ?, is_locked = ? WHERE id = ?',
+            [newPaid, debtStatus, isLocked, settle.id],
+            function(err) {
+              if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+
+              if (justFullyPaid) {
+                db.run('UPDATE repair_orders SET status = ? WHERE id = ? AND status != ?',
+                  ['completed', req.params.orderId, 'completed']);
+
+                db.all(`SELECT op.part_id, op.quantity, op.unit_price, op.subtotal
+                        FROM order_parts op WHERE op.order_id = ?`, [req.params.orderId], (err, ops) => {
+                  if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+                  if (ops && ops.length > 0) {
+                    let processed = 0;
+                    let hadError = false;
+                    ops.forEach(op => {
+                      const dedupKey = `inv_deduct_${settle.id}_${op.part_id}`;
+                      db.get('SELECT id FROM inventory_deduction_records WHERE idempotency_key = ?', [dedupKey], (derr, existing) => {
+                        if (derr) { hadError = true; db.run('ROLLBACK'); return res.status(500).json({ error: derr.message }); }
+                        if (!existing) {
+                          db.run('UPDATE parts SET stock = stock - ? WHERE id = ? AND stock >= ?',
+                            [op.quantity, op.part_id, op.quantity],
+                            function(uerr) {
+                              if (uerr) { hadError = true; db.run('ROLLBACK'); return res.status(500).json({ error: uerr.message }); }
+                              if (this.changes === 0) {
+                                hadError = true;
+                                db.run('ROLLBACK');
+                                return res.status(400).json({ error: `配件ID ${op.part_id} 库存不足，扣减失败` });
+                              }
+                              db.run(`INSERT INTO inventory_deduction_records
+                                      (settlement_id, part_id, quantity, unit_price, subtotal, idempotency_key)
+                                      VALUES (?, ?, ?, ?, ?, ?)`,
+                                [settle.id, op.part_id, op.quantity, op.unit_price, op.subtotal, dedupKey],
+                                function(ierr) {
+                                  if (ierr && !ierr.message.includes('UNIQUE')) {
+                                    hadError = true;
+                                    db.run('ROLLBACK');
+                                    return res.status(500).json({ error: ierr.message });
+                                  }
+                                  processed++;
+                                  if (processed === ops.length && !hadError) {
+                                    db.run('COMMIT');
+                                    res.json({
+                                      ok: true,
+                                      paid_amount: newPaid,
+                                      debt_status: debtStatus,
+                                      just_fully_paid: justFullyPaid,
+                                      payment_id: payRecordId,
+                                      idempotent: false
+                                    });
+                                  }
+                                }
+                              );
+                            }
+                          );
+                        } else {
+                          processed++;
+                          if (processed === ops.length && !hadError) {
+                            db.run('COMMIT');
+                            res.json({
+                              ok: true,
+                              paid_amount: newPaid,
+                              debt_status: debtStatus,
+                              just_fully_paid: justFullyPaid,
+                              payment_id: payRecordId,
+                              idempotent: false
+                            });
+                          }
+                        }
+                      });
+                    });
+                  } else {
+                    db.run('COMMIT');
+                    res.json({
+                      ok: true,
+                      paid_amount: newPaid,
+                      debt_status: debtStatus,
+                      just_fully_paid: justFullyPaid,
+                      payment_id: payRecordId,
+                      idempotent: false
+                    });
+                  }
+                });
+              } else {
+                db.run('COMMIT');
+                res.json({
+                  ok: true,
+                  paid_amount: newPaid,
+                  debt_status: debtStatus,
+                  just_fully_paid: justFullyPaid,
+                  payment_id: payRecordId,
+                  idempotent: false
+                });
+              }
+            }
+          );
+        }
+      );
+    });
+  });
+});
+
+app.post('/api/settlements/:orderId/adjust', (req, res) => {
+  const { adjustment_amount, adjustment_type, reason, operator, idempotency_key } = req.body;
+  const adjAmount = parseFloat(adjustment_amount);
+  if (isNaN(adjAmount) || adjAmount === 0) {
+    return res.status(400).json({ error: '请输入有效的调整金额（不能为0）' });
+  }
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ error: '请填写调整原因' });
+  }
+  if (!operator || !operator.trim()) {
+    return res.status(400).json({ error: '请填写操作人' });
+  }
+
+  db.get('SELECT * FROM settlements WHERE order_id = ?', [req.params.orderId], (err, settle) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!settle) return res.status(404).json({ error: '结算单不存在' });
+
+    const idempKey = idempotency_key || `adjust_${settle.id}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    db.get('SELECT * FROM settlement_adjustments WHERE idempotency_key = ?', [idempKey], (err, existingAdj) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (existingAdj) {
+        return res.json({
+          ok: true,
+          idempotent: true,
+          adjustment_id: existingAdj.id,
+          message: '幂等命中，该调整单已处理'
+        });
+      }
+
+      db.run('BEGIN TRANSACTION');
+      db.run(`INSERT INTO settlement_adjustments
+              (settlement_id, adjustment_amount, adjustment_type, reason, operator, idempotency_key)
+              VALUES (?, ?, ?, ?, ?, ?)`,
+        [settle.id, adjAmount, adjustment_type || 'manual', reason.trim(), operator.trim(), idempKey],
+        function(err) {
+          if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+          const adjId = this.lastID;
+          const newReceivable = (settle.receivable_amount || 0) + adjAmount;
+          const newDebtStatus = newReceivable - (settle.paid_amount || 0) <= 0.01
+            ? 'paid'
+            : ((settle.paid_amount || 0) > 0 ? 'partial' : 'unpaid');
+
+          db.run('UPDATE settlements SET receivable_amount = ?, debt_status = ?, is_locked = 1 WHERE id = ?',
+            [newReceivable, newDebtStatus, settle.id],
+            function(err) {
+              if (err) { db.run('ROLLBACK'); return res.status(500).json({ error: err.message }); }
+              db.run('COMMIT');
+              res.json({
+                ok: true,
+                adjustment_id: adjId,
+                idempotent: false,
+                new_receivable: newReceivable,
+                new_debt_status: newDebtStatus,
+                adjustment_amount: adjAmount
               });
             }
-            res.json({ ok: true, paid_amount: newPaid, debt_status: debtStatus, just_fully_paid: justFullyPaid });
-          }
-        );
-      }
-    );
+          );
+        }
+      );
+    });
+  });
+});
+
+app.get('/api/settlements/:orderId/adjustments', (req, res) => {
+  db.get('SELECT id FROM settlements WHERE order_id = ?', [req.params.orderId], (err, settle) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!settle) return res.status(404).json({ error: '结算单不存在' });
+    db.all(`SELECT sa.* FROM settlement_adjustments sa
+            WHERE sa.settlement_id = ?
+            ORDER BY sa.created_at DESC`, [settle.id], (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
   });
 });
 

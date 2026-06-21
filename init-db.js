@@ -101,6 +101,8 @@ db.serialize(() => {
     paid_amount REAL DEFAULT 0,
     debt_status TEXT DEFAULT 'unpaid',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    is_locked INTEGER DEFAULT 0,
+    original_receivable REAL DEFAULT 0,
     FOREIGN KEY (order_id) REFERENCES repair_orders(id) ON DELETE CASCADE
   )`);
 
@@ -111,6 +113,7 @@ db.serialize(() => {
     payment_method TEXT,
     payment_time TEXT DEFAULT CURRENT_TIMESTAMP,
     remark TEXT,
+    idempotency_key TEXT UNIQUE,
     FOREIGN KEY (settlement_id) REFERENCES settlements(id) ON DELETE CASCADE
   )`);
 
@@ -121,6 +124,31 @@ db.serialize(() => {
     comment TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (order_id) REFERENCES repair_orders(id) ON DELETE CASCADE
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS settlement_adjustments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    settlement_id INTEGER NOT NULL,
+    adjustment_amount REAL NOT NULL,
+    adjustment_type TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (settlement_id) REFERENCES settlements(id) ON DELETE CASCADE
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS inventory_deduction_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    settlement_id INTEGER NOT NULL,
+    part_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL,
+    unit_price REAL NOT NULL,
+    subtotal REAL NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (settlement_id) REFERENCES settlements(id) ON DELETE CASCADE,
+    FOREIGN KEY (part_id) REFERENCES parts(id)
   )`);
 });
 
@@ -340,13 +368,23 @@ async function init() {
           if (paid >= receivable) debtStatus = 'paid';
           else if (paid > 0) debtStatus = 'partial';
         }
-        const settleRes = await runSql(db, 'INSERT INTO settlements (order_id, labor_total, parts_total, discount, receivable_amount, paid_amount, debt_status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [oid, laborTotal, partsTotal, discount, receivable, paid, debtStatus]);
+        const settleRes = await runSql(db, 'INSERT INTO settlements (order_id, labor_total, parts_total, discount, receivable_amount, original_receivable, paid_amount, debt_status, is_locked) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [oid, laborTotal, partsTotal, discount, receivable, receivable, paid, debtStatus, (status === 'completed' ? 1 : 0)]);
         const sid = settleRes.lastID;
         if (paid > 0) {
           const payDate = new Date(recvDate.getTime() + 3 * 86400000);
-          await runSql(db, 'INSERT INTO payment_records (settlement_id, amount, payment_method, payment_time, remark) VALUES (?, ?, ?, ?, ?)',
-            [sid, paid, (i%2===0) ? '微信' : '现金', payDate.toISOString(), '']);
+          const payIdemKey = `pay_init_${oid}_1`;
+          await runSql(db, 'INSERT INTO payment_records (settlement_id, amount, payment_method, payment_time, remark, idempotency_key) VALUES (?, ?, ?, ?, ?, ?)',
+            [sid, paid, (i%2===0) ? '微信' : '现金', payDate.toISOString(), '', payIdemKey]);
+        }
+        if (status === 'completed') {
+          for (const up of usedParts) {
+            const dedupKey = `inv_deduct_${sid}_${up.pid}`;
+            await runSql(db, `INSERT INTO inventory_deduction_records
+                    (settlement_id, part_id, quantity, unit_price, subtotal, idempotency_key)
+                    VALUES (?, ?, ?, ?, ?, ?)`,
+              [sid, up.pid, up.qty, up.price, up.subtotal, dedupKey]);
+          }
         }
         if (status === 'completed' && i % 3 !== 0) {
           const rating = 3 + (i % 3);

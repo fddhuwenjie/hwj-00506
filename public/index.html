@@ -351,6 +351,43 @@ textarea { resize: vertical; min-height: 80px; padding: 8px 12px; border: 1px so
   </div>
 </div>
 
+<!-- 结算调整单模态框 -->
+<div class="modal" id="adjustModal">
+  <div class="modal-content" style="max-width:500px">
+    <div class="modal-header"><h3>结算调整单</h3><button class="close" onclick="closeModal('adjustModal')">×</button></div>
+    <div class="modal-body">
+      <div class="alert alert-warning" style="margin-bottom:16px">
+        ⚠️ 调整单将永久记录，不可删除。正数表示增加应收金额，负数表示减少。
+      </div>
+      <div class="form-group">
+        <label>调整金额 (元) *</label>
+        <input type="number" class="input" id="adjAmount" step="0.01" placeholder="正数增加，负数减少，如 -50 或 100">
+      </div>
+      <div class="form-group">
+        <label>调整类型</label>
+        <select class="input" id="adjType">
+          <option value="manual">手动调整</option>
+          <option value="discount">折扣优惠</option>
+          <option value="surcharge">补收费用</option>
+          <option value="refund">退款调整</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>调整原因 *</label>
+        <textarea id="adjReason" placeholder="请详细说明调整原因，以备财务审计..."></textarea>
+      </div>
+      <div class="form-group">
+        <label>操作人 *</label>
+        <input type="text" class="input" id="adjOperator" placeholder="请输入操作人姓名">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-default" onclick="closeModal('adjustModal')">取消</button>
+      <button class="btn btn-warning" onclick="submitAdjustment()">确认调整</button>
+    </div>
+  </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

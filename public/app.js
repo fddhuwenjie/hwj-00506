@@ -759,8 +759,11 @@ async function openSettleDetail(oid) {
     ratingValue = 0;
     const s = await api('/settlements/' + oid);
     const unpaid = (s.receivable_amount || 0) - (s.paid_amount || 0);
+    const originalReceivable = s.original_receivable || s.receivable_amount;
+    const totalAdjustment = s.total_adjustment || 0;
+    const hasAdjustment = Math.abs(totalAdjustment) > 0.001;
     document.getElementById('settleModalTitle').textContent =
-      `结算单 #${s.order_no} [${s.plate_number}]`;
+      `结算单 #${s.order_no} [${s.plate_number}]${s.is_locked ? ' 🔒' : ''}`;
 
     let html = '';
     html += `<div class="detail-section"><h4>📋 订单信息</h4>
@@ -769,7 +772,9 @@ async function openSettleDetail(oid) {
         <div class="detail-item"><div class="label">车主</div><div class="value">${s.owner_name} / ${s.phone}</div></div>
         <div class="detail-item"><div class="label">工单状态</div><div class="value"><span class="badge ${STATUS_CLASS[s.order_status]}">${STATUS_MAP[s.order_status] || s.order_status}</span></div></div>
         <div class="detail-item"><div class="label">欠款状态</div><div class="value"><span class="badge ${DEBT_CLASS[s.debt_status]}">${DEBT_MAP[s.debt_status] || s.debt_status}</span></div></div>
+        <div class="detail-item"><div class="label">锁定状态</div><div class="value">${s.is_locked ? '<span class="badge badge-partial">🔒 已锁定</span>' : '<span class="badge badge-normal">未锁定</span>'}</div></div>
       </div>
+      ${s.is_locked ? '<div class="alert alert-warning" style="margin-top:10px">⚠️ 该结算单已锁定，无法直接修改金额。如需调整，请通过「结算调整单」办理。</div>' : ''}
     </div>`;
 
     html += `<div class="detail-section"><h4>💰 费用明细</h4>
@@ -777,19 +782,65 @@ async function openSettleDetail(oid) {
         <div class="detail-item"><div class="label">工时费</div><div class="value" style="color:#3182ce">¥${(s.labor_total || 0).toFixed(2)}</div></div>
         <div class="detail-item"><div class="label">配件费</div><div class="value" style="color:#38a169">¥${(s.parts_total || 0).toFixed(2)}</div></div>
         <div class="detail-item"><div class="label">优惠</div><div class="value" style="color:#dd6b20">-¥${(s.discount || 0).toFixed(2)}</div></div>
-        <div class="detail-item"><div class="label">应收金额</div><div class="value" style="color:#e53e3e;font-size:20px;font-weight:bold">¥${(s.receivable_amount || 0).toFixed(2)}</div></div>
+      </div>
+      <div class="detail-row" style="margin-top:8px">
+        <div class="detail-item"><div class="label">原始应收</div><div class="value" style="color:#888;text-decoration:${hasAdjustment ? 'line-through' : 'none'}">¥${originalReceivable.toFixed(2)}</div></div>
+        <div class="detail-item"><div class="label">调整金额</div><div class="value" style="color:${totalAdjustment >= 0 ? '#e53e3e' : '#38a169'};font-weight:bold">${totalAdjustment >= 0 ? '+' : ''}¥${totalAdjustment.toFixed(2)}</div></div>
+        <div class="detail-item"><div class="label">当前应收</div><div class="value" style="color:#e53e3e;font-size:20px;font-weight:bold">¥${(s.receivable_amount || 0).toFixed(2)}</div></div>
+      </div>
+      <div class="detail-row" style="margin-top:8px">
         <div class="detail-item"><div class="label">已收金额</div><div class="value" style="color:#38a169;font-weight:bold">¥${(s.paid_amount || 0).toFixed(2)}</div></div>
         <div class="detail-item"><div class="label">待收金额</div><div class="value" style="color:${unpaid > 0 ? '#e53e3e' : '#38a169'};font-weight:bold">¥${unpaid.toFixed(2)}</div></div>
       </div>
     </div>`;
 
-    html += `<div class="detail-section"><h4>💳 收款记录</h4>`;
+    html += `<div class="detail-section">
+      <div class="flex-between" style="margin-bottom:10px">
+        <h4 style="margin:0">📝 调整记录</h4>
+        <button class="btn btn-sm btn-warning" onclick="openAdjustModal()">➕ 结算调整</button>
+      </div>`;
+    if (s.adjustments && s.adjustments.length > 0) {
+      html += '<table><thead><tr><th>时间</th><th>类型</th><th>调整金额</th><th>原因</th><th>操作人</th></tr></thead><tbody>';
+      s.adjustments.forEach(a => {
+        const amountClass = a.adjustment_amount >= 0 ? 'text-danger' : 'text-success';
+        html += `<tr><td>${a.created_at ? a.created_at.substring(0, 16) : '-'}</td>
+          <td>${a.adjustment_type === 'discount' ? '折扣调整' : a.adjustment_type === 'surcharge' ? '补收费用' : '手动调整'}</td>
+          <td style="color:${a.adjustment_amount >= 0 ? '#e53e3e' : '#38a169'};font-weight:bold">${a.adjustment_amount >= 0 ? '+' : ''}¥${a.adjustment_amount.toFixed(2)}</td>
+          <td style="max-width:200px;font-size:12px">${a.reason || '-'}</td>
+          <td>${a.operator || '-'}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="empty">暂无调整记录</div>';
+    }
+    html += '</div>';
+
+    html += `<div class="detail-section"><h4>📦 库存扣减记录</h4>`;
+    if (s.deduction_records && s.deduction_records.length > 0) {
+      html += '<table><thead><tr><th>SKU</th><th>配件名</th><th>数量</th><th>单价</th><th>小计</th><th>扣减时间</th></tr></thead><tbody>';
+      s.deduction_records.forEach(d => {
+        html += `<tr><td>${d.sku || '-'}</td>
+          <td>${d.part_name || '-'}</td>
+          <td>${d.quantity}</td>
+          <td>¥${d.unit_price.toFixed(2)}</td>
+          <td style="color:#e53e3e">¥${d.subtotal.toFixed(2)}</td>
+          <td style="font-size:12px">${d.created_at ? d.created_at.substring(0, 16) : '-'}</td></tr>`;
+      });
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="empty">暂无库存扣减记录（结清尾款时自动扣减）</div>';
+    }
+    html += '</div>';
+
+    html += `<div class="detail-section"><h4>💳 收款流水</h4>`;
     if (s.payments && s.payments.length > 0) {
-      html += '<table><thead><tr><th>时间</th><th>金额</th><th>付款方式</th><th>备注</th></tr></thead><tbody>';
-      s.payments.forEach(p => {
-        html += `<tr><td>${p.payment_time ? p.payment_time.substring(0, 16) : '-'}</td>
+      html += '<table><thead><tr><th>序号</th><th>收款时间</th><th>收款金额</th><th>付款方式</th><th>备注</th></tr></thead><tbody>';
+      s.payments.forEach((p, idx) => {
+        html += `<tr><td>#${s.payments.length - idx}</td>
+          <td>${p.payment_time ? p.payment_time.substring(0, 16) : '-'}</td>
           <td style="color:#38a169;font-weight:bold">¥${p.amount.toFixed(2)}</td>
-          <td>${p.payment_method || '-'}</td><td>${p.remark || '-'}</td></tr>`;
+          <td>${p.payment_method || '-'}</td>
+          <td>${p.remark || '-'}</td></tr>`;
       });
       html += '</tbody></table>';
     } else {
@@ -888,12 +939,46 @@ async function submitPayment(maxUnpaid) {
       method: 'POST',
       body: JSON.stringify({ amount, payment_method: method, remark })
     });
-    showAlert(`成功收款 ¥${amount.toFixed(2)}${result.just_fully_paid ? '，工单已全部结清，配件库存已扣减' : ''}`, 'success');
+    showAlert(`成功收款 ¥${amount.toFixed(2)}${result.just_fully_paid ? '，工单已全部结清，配件库存已扣减' : ''}${result.idempotent ? '（幂等命中）' : ''}`, 'success');
     openSettleDetail(currentSettleOrderId);
     loadSettlements();
     loadOrders();
     loadDashboard();
   } catch (e) { showAlert(e.error || '收款失败'); }
+}
+
+function openAdjustModal() {
+  document.getElementById('adjAmount').value = '';
+  document.getElementById('adjType').value = 'manual';
+  document.getElementById('adjReason').value = '';
+  document.getElementById('adjOperator').value = '';
+  openModal('adjustModal');
+}
+
+async function submitAdjustment() {
+  const amount = parseFloat(document.getElementById('adjAmount').value);
+  const type = document.getElementById('adjType').value;
+  const reason = document.getElementById('adjReason').value.trim();
+  const operator = document.getElementById('adjOperator').value.trim();
+  if (isNaN(amount) || amount === 0) return showAlert('请输入有效的调整金额（不能为0）');
+  if (!reason) return showAlert('请填写调整原因');
+  if (!operator) return showAlert('请填写操作人');
+  try {
+    const result = await api(`/settlements/${currentSettleOrderId}/adjust`, {
+      method: 'POST',
+      body: JSON.stringify({
+        adjustment_amount: amount,
+        adjustment_type: type,
+        reason,
+        operator
+      })
+    });
+    showAlert(`结算调整成功 ${result.idempotent ? '（幂等命中）' : ''}，${amount >= 0 ? '增加' : '减少'} ¥${Math.abs(amount).toFixed(2)}`, 'success');
+    closeModal('adjustModal');
+    openSettleDetail(currentSettleOrderId);
+    loadSettlements();
+    loadDashboard();
+  } catch (e) { showAlert(e.error || '调整失败'); }
 }
 
 async function submitReview() {
