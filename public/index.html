@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>车辆维修保养管理系统</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; background: #f0f2f5; color: #333; }
+.layout { display: flex; min-height: 100vh; }
+.sidebar { width: 240px; background: linear-gradient(180deg, #1e3a5f 0%, #2c5282 100%); color: #fff; padding: 20px 0; flex-shrink: 0; }
+.logo { padding: 0 20px 30px; font-size: 20px; font-weight: bold; border-bottom: 1px solid rgba(255,255,255,0.1); }
+.nav-menu { list-style: none; padding: 15px 0; }
+.nav-menu li { padding: 14px 24px; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; gap: 10px; font-size: 14px; }
+.nav-menu li:hover { background: rgba(255,255,255,0.1); }
+.nav-menu li.active { background: #4299e1; border-left: 4px solid #fff; }
+.nav-menu li .icon { font-size: 18px; }
+.main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.header { height: 60px; background: #fff; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+.header h2 { font-size: 18px; color: #2c5282; }
+.header .date { color: #666; font-size: 14px; }
+.content { flex: 1; padding: 24px; overflow-y: auto; }
+.page { display: none; }
+.page.active { display: block; }
+.card { background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+.card-header { padding: 16px 20px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+.card-header h3 { font-size: 16px; color: #333; }
+.card-body { padding: 20px; }
+.btn { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+.btn-primary { background: #4299e1; color: #fff; }
+.btn-primary:hover { background: #3182ce; }
+.btn-success { background: #38a169; color: #fff; }
+.btn-success:hover { background: #2f855a; }
+.btn-danger { background: #e53e3e; color: #fff; }
+.btn-danger:hover { background: #c53030; }
+.btn-warning { background: #dd6b20; color: #fff; }
+.btn-warning:hover { background: #c05621; }
+.btn-default { background: #e2e8f0; color: #2d3748; }
+.btn-default:hover { background: #cbd5e0; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+.toolbar { display: flex; gap: 10px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+.input, select { padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; outline: none; }
+.input:focus, select:focus { border-color: #4299e1; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+th { background: #f7fafc; font-weight: 600; color: #4a5568; }
+tr:hover { background: #f7fafc; }
+.badge { padding: 4px 10px; border-radius: 12px; font-size: 11px; font-weight: 500; display: inline-block; }
+.badge-pending-diagnosis { background: #fef3c7; color: #92400e; }
+.badge-in-repair { background: #dbeafe; color: #1e40af; }
+.badge-pending-settlement { background: #e0e7ff; color: #3730a3; }
+.badge-completed { background: #d1fae5; color: #065f46; }
+.badge-cancelled { background: #f3f4f6; color: #4b5563; }
+.badge-due { background: #fee2e2; color: #991b1b; }
+.badge-upcoming { background: #fef3c7; color: #92400e; }
+.badge-normal { background: #d1fae5; color: #065f46; }
+.badge-paid { background: #d1fae5; color: #065f46; }
+.badge-partial { background: #fef3c7; color: #92400e; }
+.badge-unpaid { background: #fee2e2; color: #991b1b; }
+.badge-low-stock { background: #fee2e2; color: #991b1b; }
+.modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 1000; justify-content: center; align-items: center; }
+.modal.active { display: flex; }
+.modal-content { background: #fff; border-radius: 10px; width: 90%; max-width: 700px; max-height: 90vh; overflow: hidden; display: flex; flex-direction: column; }
+.modal-header { padding: 18px 24px; border-bottom: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
+.modal-header h3 { font-size: 16px; }
+.modal-body { padding: 24px; overflow-y: auto; }
+.modal-footer { padding: 16px 24px; border-top: 1px solid #eee; display: flex; justify-content: flex-end; gap: 10px; }
+.form-group { margin-bottom: 18px; }
+.form-group label { display: block; margin-bottom: 6px; font-size: 13px; color: #4a5568; font-weight: 500; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.form-group .input, .form-group select, .form-group textarea { width: 100%; }
+textarea { resize: vertical; min-height: 80px; padding: 8px 12px; border: 1px solid #ddd; border-radius: 6px; font-size: 14px; font-family: inherit; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 20px; }
+.stat-card { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+.stat-label { font-size: 13px; color: #666; margin-bottom: 8px; }
+.stat-value { font-size: 28px; font-weight: bold; color: #2c5282; }
+.stat-value.danger { color: #e53e3e; }
+.stat-value.warning { color: #dd6b20; }
+.stat-value.success { color: #38a169; }
+.stat-footer { margin-top: 8px; font-size: 12px; color: #999; }
+.close { font-size: 22px; cursor: pointer; color: #999; border: none; background: none; }
+.detail-section { margin: 16px 0; padding: 16px; background: #f7fafc; border-radius: 6px; }
+.detail-section h4 { font-size: 14px; margin-bottom: 12px; color: #2c5282; }
+.detail-row { display: flex; gap: 20px; flex-wrap: wrap; }
+.detail-item { flex: 1; min-width: 150px; margin-bottom: 8px; }
+.detail-item .label { font-size: 12px; color: #666; }
+.detail-item .value { font-size: 14px; color: #333; font-weight: 500; margin-top: 2px; }
+.action-bar { display: flex; gap: 6px; flex-wrap: wrap; }
+.empty { text-align: center; padding: 40px; color: #999; }
+.chart-bar { height: 20px; background: #e2e8f0; border-radius: 10px; overflow: hidden; position: relative; }
+.chart-bar-fill { height: 100%; background: linear-gradient(90deg, #4299e1, #3182ce); transition: width 0.3s; }
+.chart-item { margin-bottom: 12px; }
+.chart-label { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: 13px; }
+.section-title { font-size: 15px; font-weight: 600; color: #2d3748; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 2px solid #4299e1; display: inline-block; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+@media (max-width: 768px) {
+  .sidebar { width: 60px; }
+  .logo { display: none; }
+  .nav-menu li span { display: none; }
+  .form-row { grid-template-columns: 1fr; }
+  .grid-2 { grid-template-columns: 1fr; }
+}
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 1px solid #eee; }
+.tab { padding: 10px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 14px; color: #666; }
+.tab.active { color: #4299e1; border-bottom-color: #4299e1; font-weight: 500; }
+.alert { padding: 12px 16px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+.alert-error { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+.alert-success { background: #d1fae5; color: #065f46; border: 1px solid #a7f3d0; }
+.alert-warning { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+.flex-between { display: flex; justify-content: space-between; align-items: center; }
+.stars { color: #fbbf24; font-size: 16px; letter-spacing: 2px; }
+.rating-input { display: flex; gap: 4px; cursor: pointer; font-size: 24px; }
+.rating-input span { color: #ddd; transition: color 0.1s; }
+.rating-input span.active, .rating-input span:hover { color: #fbbf24; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="logo">🚗 车辆维修管理系统</div>
+    <ul class="nav-menu">
+      <li class="active" data-page="dashboard"><span class="icon">📊</span><span>统计概览</span></li>
+      <li data-page="vehicles"><span class="icon">🚙</span><span>车辆档案</span></li>
+      <li data-page="orders"><span class="icon">🔧</span><span>维修工单</span></li>
+      <li data-page="maintenance"><span class="icon">🛡️</span><span>保养计划</span></li>
+      <li data-page="parts"><span class="icon">📦</span><span>配件库存</span></li>
+      <li data-page="settlements"><span class="icon">💰</span><span>结算评价</span></li>
+    </ul>
+  </aside>
+  <div class="main">
+    <div class="header">
+      <h2 id="pageTitle">统计概览</h2>
+      <div class="date" id="today"></div>
+    </div>
+    <div class="content" id="alertContainer">
+      
+      <div id="dashboard" class="page active">
+        <div class="stats-grid">
+          <div class="stat-card"><div class="stat-label">本月维修收入</div><div class="stat-value success" id="stat-revenue">¥0</div><div class="stat-footer">本月累计</div></div>
+          <div class="stat-card"><div class="stat-label">维修工单总数</div><div class="stat-value" id="stat-orders">0</div><div class="stat-footer" id="stat-orders-detail"></div></div>
+          <div class="stat-card"><div class="stat-label">保养待处理</div><div class="stat-value warning" id="stat-maint">0</div><div class="stat-footer" id="stat-maint-detail"></div></div>
+          <div class="stat-card"><div class="stat-label">保险即将到期</div><div class="stat-value danger" id="stat-insurance">0</div><div class="stat-footer">30天内</div></div>
+          <div class="stat-card"><div class="stat-label">返修率</div><div class="stat-value" id="stat-rework">0%</div><div class="stat-footer">综合指标</div></div>
+          <div class="stat-card"><div class="stat-label">低库存配件</div><div class="stat-value danger" id="stat-lowstock">0</div><div class="stat-footer">库存预警</div></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header"><h3>📈 近12月维修收入趋势</h3></div>
+            <div class="card-body" id="revenue-chart"></div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h3>🏆 配件消耗排行 TOP10</h3></div>
+            <div class="card-body" id="parts-ranking"></div>
+          </div>
+        </div>
+        <div class="grid-2" style="margin-top:0">
+          <div class="card">
+            <div class="card-header"><h3>👨‍🔧 技师工时排名</h3></div>
+            <div class="card-body" id="tech-ranking"></div>
+          </div>
+          <div class="card">
+            <div class="card-header"><h3>⚠️ 即将到期保险车辆 (30天内)</h3></div>
+            <div class="card-body" id="insurance-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="vehicles" class="page">
+        <div class="card">
+          <div class="card-body">
+            <div class="toolbar">
+              <input type="text" class="input" id="vehicleSearch" placeholder="🔍 搜索车牌号或车主姓名..." style="width:300px">
+              <button class="btn btn-primary" onclick="openVehicleModal()">+ 新增车辆</button>
+            </div>
+            <table>
+              <thead><tr><th>车牌号</th><th>品牌型号</th><th>车主姓名</th><th>联系电话</th><th>里程</th><th>购车日期</th><th>VIN码</th><th>保险到期</th><th>操作</th></tr></thead>
+              <tbody id="vehicleList"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="orders" class="page">
+        <div class="card">
+          <div class="card-body">
+            <div class="toolbar">
+              <select id="orderStatusFilter" onchange="loadOrders()">
+                <option value="">全部状态</option>
+                <option value="pending_diagnosis">待诊断</option>
+                <option value="in_repair">维修中</option>
+                <option value="pending_settlement">待结算</option>
+                <option value="completed">已完成</option>
+                <option value="cancelled">已取消</option>
+              </select>
+              <button class="btn btn-primary" onclick="openOrderModal()">+ 创建维修单</button>
+            </div>
+            <table>
+              <thead><tr><th>工单号</th><th>车牌号</th><th>车主</th><th>车辆</th><th>技师</th><th>接车时间</th><th>预计交付</th><th>工时费</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="orderList"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="maintenance" class="page">
+        <div class="card">
+          <div class="card-body">
+            <div class="tabs">
+              <div class="tab active" data-tab="all" onclick="switchMaintTab(this)">全部</div>
+              <div class="tab" data-tab="due" onclick="switchMaintTab(this)">🔴 待处理</div>
+              <div class="tab" data-tab="upcoming" onclick="switchMaintTab(this)">🟡 即将到期</div>
+            </div>
+            <table>
+              <thead><tr><th>车牌号</th><th>车主</th><th>保养项目</th><th>上次里程</th><th>下次里程</th><th>上次日期</th><th>下次日期</th><th>剩余里程/天数</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="maintList"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="parts" class="page">
+        <div class="card">
+          <div class="card-body">
+            <div class="toolbar">
+              <input type="text" class="input" id="partSearch" placeholder="🔍 搜索配件名称/SKU/类别..." style="width:300px">
+              <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="lowStockOnly" onchange="loadParts()"> 仅看低库存</label>
+              <button class="btn btn-primary" onclick="openPartModal()">+ 新增配件</button>
+            </div>
+            <table>
+              <thead><tr><th>SKU</th><th>配件名称</th><th>类别</th><th>库存</th><th>成本价</th><th>售价</th><th>适配车型</th><th>操作</th></tr></thead>
+              <tbody id="partList"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="settlements" class="page">
+        <div class="card">
+          <div class="card-body">
+            <div class="toolbar">
+              <input type="text" class="input" id="settleSearch" placeholder="🔍 搜索工单号/车牌/车主..." style="width:300px">
+            </div>
+            <table>
+              <thead><tr><th>工单号</th><th>车牌号</th><th>车主</th><th>工时费</th><th>配件费</th><th>优惠</th><th>应收</th><th>已收</th><th>欠款</th><th>状态</th><th>操作</th></tr></thead>
+              <tbody id="settleList"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- 车辆模态框 -->
+<div class="modal" id="vehicleModal">
+  <div class="modal-content">
+    <div class="modal-header"><h3 id="vehicleModalTitle">新增车辆</h3><button class="close" onclick="closeModal('vehicleModal')">×</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>车牌号 *</label><input type="text" class="input" id="v_plate"></div>
+        <div class="form-group"><label>品牌型号 *</label><input type="text" class="input" id="v_brand"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>车主姓名 *</label><input type="text" class="input" id="v_owner"></div>
+        <div class="form-group"><label>联系电话 *</label><input type="text" class="input" id="v_phone"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>里程数 (km)</label><input type="number" class="input" id="v_mileage" value="0"></div>
+        <div class="form-group"><label>购车日期</label><input type="date" class="input" id="v_purchase"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>VIN码</label><input type="text" class="input" id="v_vin" placeholder="17位车辆识别码"></div>
+        <div class="form-group"><label>保险到期日</label><input type="date" class="input" id="v_insurance"></div>
+      </div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-default" onclick="closeModal('vehicleModal')">取消</button><button class="btn btn-primary" onclick="saveVehicle()">保存</button></div>
+  </div>
+</div>
+
+<!-- 工单模态框 -->
+<div class="modal" id="orderModal">
+  <div class="modal-content" style="max-width:800px">
+    <div class="modal-header"><h3 id="orderModalTitle">创建维修单</h3><button class="close" onclick="closeModal('orderModal')">×</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>选择车辆 *</label><select id="o_vehicle"></select></div>
+        <div class="form-group"><label>负责技师</label><select id="o_tech"></select></div>
+      </div>
+      <div class="form-group"><label>故障描述 *</label><textarea id="o_fault" placeholder="请详细描述车辆故障现象..."></textarea></div>
+      <div class="form-row">
+        <div class="form-group"><label>接车时间</label><input type="datetime-local" class="input" id="o_receive"></div>
+        <div class="form-group"><label>预计交付</label><input type="datetime-local" class="input" id="o_expected"></div>
+      </div>
+      <div class="detail-section">
+        <div class="flex-between" style="margin-bottom:10px"><h4 style="margin-bottom:0">维修项目</h4><button class="btn btn-sm btn-primary" onclick="addOrderItem()">+ 添加项目</button></div>
+        <table id="orderItemsTable"><thead><tr><th>项目名称</th><th style="width:100px">工时(h)</th><th style="width:120px">工时费(元)</th><th>说明</th><th style="width:80px">操作</th></tr></thead><tbody id="orderItemsBody"></tbody></table>
+      </div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-default" onclick="closeModal('orderModal')">取消</button><button class="btn btn-primary" onclick="saveOrder()">保存工单</button></div>
+  </div>
+</div>
+
+<!-- 工单详情模态框 -->
+<div class="modal" id="orderDetailModal">
+  <div class="modal-content" style="max-width:900px">
+    <div class="modal-header"><h3>工单详情 - <span id="detailOrderNo"></span> <span id="detailStatusBadge" class="badge"></span></h3><button class="close" onclick="closeModal('orderDetailModal')">×</button></div>
+    <div class="modal-body" id="orderDetailBody"></div>
+  </div>
+</div>
+
+<!-- 配件模态框 -->
+<div class="modal" id="partModal">
+  <div class="modal-content">
+    <div class="modal-header"><h3 id="partModalTitle">新增配件</h3><button class="close" onclick="closeModal('partModal')">×</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>SKU编号 *</label><input type="text" class="input" id="p_sku" placeholder="如 P001"></div>
+        <div class="form-group"><label>配件名称 *</label><input type="text" class="input" id="p_name"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>类别</label><input type="text" class="input" id="p_category" placeholder="如:机油/滤清器/轮胎"></div>
+        <div class="form-group"><label>库存数量</label><input type="number" class="input" id="p_stock" value="0"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>成本价 (元)</label><input type="number" class="input" step="0.01" id="p_cost" value="0"></div>
+        <div class="form-group"><label>售价 (元)</label><input type="number" class="input" step="0.01" id="p_price" value="0"></div>
+      </div>
+      <div class="form-group"><label>适配车型</label><input type="text" class="input" id="p_models" placeholder="如:丰田/本田/通用"></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-default" onclick="closeModal('partModal')">取消</button><button class="btn btn-primary" onclick="savePart()">保存</button></div>
+  </div>
+</div>
+
+<!-- 入库模态框 -->
+<div class="modal" id="restockModal">
+  <div class="modal-content" style="max-width:400px">
+    <div class="modal-header"><h3>配件入库 - <span id="restockPartName"></span></h3><button class="close" onclick="closeModal('restockModal')">×</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label>入库数量</label><input type="number" class="input" id="restockQty" value="10" min="1"></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-default" onclick="closeModal('restockModal')">取消</button><button class="btn btn-success" onclick="confirmRestock()">确认入库</button></div>
+  </div>
+</div>
+
+<!-- 结算模态框 -->
+<div class="modal" id="settleModal">
+  <div class="modal-content" style="max-width:800px">
+    <div class="modal-header"><h3 id="settleModalTitle">结算详情</h3><button class="close" onclick="closeModal('settleModal')">×</button></div>
+    <div class="modal-body" id="settleBody"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
