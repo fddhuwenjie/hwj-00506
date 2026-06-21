@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test": "node test-settlement-lock.js",
+    "test:automation": "node test-settlement-inventory-automation.js",
+    "test:all": "npm run test && npm run test:automation"
   },
   "dependencies": {
     "express": "^4.18.2",
