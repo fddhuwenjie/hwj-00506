@@ -420,16 +420,31 @@ app.get('/api/maintenance-plans', (req, res) => {
 app.post('/api/maintenance-plans/:id/complete', (req, res) => {
   const { current_mileage } = req.body;
   const mid = req.params.id;
-  db.get('SELECT * FROM maintenance_plans WHERE id = ?', [mid], (err, plan) => {
+  const curMileage = parseInt(current_mileage);
+  if (isNaN(curMileage) || curMileage < 0) {
+    return res.status(400).json({ error: '请输入有效的里程数' });
+  }
+  db.get(`SELECT mp.*, v.mileage as vehicle_mileage, v.plate_number
+          FROM maintenance_plans mp LEFT JOIN vehicles v ON mp.vehicle_id = v.id
+          WHERE mp.id = ?`, [mid], (err, plan) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!plan) return res.status(404).json({ error: '保养计划不存在' });
+    if (curMileage < plan.vehicle_mileage) {
+      return res.status(400).json({
+        error: `填写里程（${curMileage.toLocaleString()} km）低于车辆当前里程（${plan.vehicle_mileage.toLocaleString()} km），请确认后重新填写`,
+        vehicle_mileage: plan.vehicle_mileage
+      });
+    }
     const today = new Date().toISOString().split('T')[0];
-    const nextMil = (current_mileage || plan.last_mileage) + (plan.interval_mileage || 0);
+    const nextMil = curMileage + (plan.interval_mileage || 0);
     const nextDate = new Date(new Date(today).getTime() + (plan.interval_days || 0) * 86400000).toISOString().split('T')[0];
     db.run(`UPDATE maintenance_plans SET last_mileage=?, last_date=?, next_mileage=?, next_date=?, status='normal' WHERE id=?`,
-      [current_mileage || plan.last_mileage, today, nextMil, nextDate, mid],
+      [curMileage, today, nextMil, nextDate, mid],
       function(err) {
         if (err) return res.status(500).json({ error: err.message });
+        db.run('UPDATE vehicles SET mileage = MAX(mileage, ?) WHERE id = ?', [curMileage, plan.vehicle_id], function(verr) {
+          if (verr) console.warn('同步车辆里程失败:', verr.message);
+        });
         res.json({ ok: true, next_mileage: nextMil, next_date: nextDate });
       }
     );
@@ -497,30 +512,45 @@ app.get('/api/settlements/:orderId', (req, res) => {
 
 app.post('/api/settlements/:orderId/pay', (req, res) => {
   const { amount, payment_method, remark } = req.body;
+  const payAmount = parseFloat(amount);
+  if (isNaN(payAmount) || payAmount <= 0) {
+    return res.status(400).json({ error: '请输入有效收款金额' });
+  }
   db.get('SELECT * FROM settlements WHERE order_id = ?', [req.params.orderId], (err, settle) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!settle) return res.status(404).json({ error: '结算单不存在' });
-    const newPaid = (settle.paid_amount || 0) + amount;
-    const debtStatus = newPaid >= settle.receivable_amount ? 'paid' : (newPaid > 0 ? 'partial' : 'unpaid');
+    if (settle.debt_status === 'paid') {
+      return res.status(400).json({ error: '该工单已全部结清，不可继续收款' });
+    }
+    const unpaid = (settle.receivable_amount || 0) - (settle.paid_amount || 0);
+    if (payAmount > unpaid + 0.01) {
+      return res.status(400).json({ error: `收款金额超出欠款金额（最多可收 ¥${unpaid.toFixed(2)}）` });
+    }
+    const wasPaid = settle.debt_status === 'paid';
+    const newPaid = (settle.paid_amount || 0) + payAmount;
+    const debtStatus = newPaid >= settle.receivable_amount - 0.01 ? 'paid' : (newPaid > 0 ? 'partial' : 'unpaid');
+    const justFullyPaid = !wasPaid && debtStatus === 'paid';
     db.run('INSERT INTO payment_records (settlement_id, amount, payment_method, remark) VALUES (?, ?, ?, ?)',
-      [settle.id, amount, payment_method || '现金', remark || ''],
+      [settle.id, payAmount, payment_method || '现金', remark || ''],
       function(err) {
         if (err) return res.status(500).json({ error: err.message });
         db.run('UPDATE settlements SET paid_amount = ?, debt_status = ? WHERE id = ?',
           [newPaid, debtStatus, settle.id],
           function(err) {
             if (err) return res.status(500).json({ error: err.message });
-            if (debtStatus === 'paid') {
-              db.run('UPDATE repair_orders SET status = ? WHERE id = ?', ['completed', req.params.orderId]);
+            if (justFullyPaid) {
+              db.run('UPDATE repair_orders SET status = ? WHERE id = ? AND status != ?',
+                ['completed', req.params.orderId, 'completed']);
               db.all(`SELECT op.part_id, op.quantity FROM order_parts op WHERE op.order_id = ?`, [req.params.orderId], (err, ops) => {
                 if (!err && ops) {
                   ops.forEach(op => {
-                    db.run('UPDATE parts SET stock = stock - ? WHERE id = ?', [op.quantity, op.part_id]);
+                    db.run('UPDATE parts SET stock = stock - ? WHERE id = ? AND stock >= ?',
+                      [op.quantity, op.part_id, op.quantity]);
                   });
                 }
               });
             }
-            res.json({ ok: true, paid_amount: newPaid, debt_status: debtStatus });
+            res.json({ ok: true, paid_amount: newPaid, debt_status: debtStatus, just_fully_paid: justFullyPaid });
           }
         );
       }

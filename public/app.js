@@ -585,10 +585,14 @@ async function loadMaintenance() {
 }
 
 async function completeMaint(id, mileage) {
-  const curStr = prompt('请输入完成保养时的车辆里程数 (km):', String(mileage || 0));
+  const vmile = mileage || 0;
+  const curStr = prompt(`请输入完成保养时的车辆里程数 (km)：\n\n⚠️  车辆当前里程：${vmile.toLocaleString()} km\n❗ 填写值不得低于当前里程`, String(vmile));
   if (curStr === null) return;
   const cur = parseInt(curStr);
   if (isNaN(cur)) return showAlert('请输入有效里程数');
+  if (cur < vmile) {
+    return showAlert(`填写里程（${cur.toLocaleString()} km）低于车辆当前里程（${vmile.toLocaleString()} km），请重新填写`);
+  }
   try {
     await api(`/maintenance-plans/${id}/complete`, {
       method: 'POST',
@@ -596,7 +600,7 @@ async function completeMaint(id, mileage) {
     });
     loadMaintenance();
     loadDashboard();
-    showAlert('保养已完成，下次提醒已自动更新', 'success');
+    showAlert(`保养已完成，下次提醒里程：${(cur + 10000).toLocaleString()} km 起`, 'success');
   } catch (e) { showAlert(e.error || '操作失败'); }
 }
 
@@ -794,10 +798,10 @@ async function openSettleDetail(oid) {
     html += '</div>';
 
     if (unpaid > 0) {
-      html += `<div class="detail-section"><h4>➕ 添加收款</h4>
+      html += `<div class="detail-section"><h4>➕ 添加收款 <span style="color:#999;font-weight:normal;font-size:12px">（最多可收 ¥${unpaid.toFixed(2)}）</span></h4>
         <div class="form-row">
-          <div class="form-group"><label>收款金额 (元) *</label>
-            <input type="number" class="input" id="payAmount" step="0.01" value="${unpaid}" placeholder="${unpaid}"></div>
+          <div class="form-group"><label>收款金额 (元) * (上限 ¥${unpaid.toFixed(2)})</label>
+            <input type="number" class="input" id="payAmount" step="0.01" min="0.01" max="${unpaid}" value="${unpaid}"></div>
           <div class="form-group"><label>付款方式</label>
             <select class="input" id="payMethod">
               <option>现金</option><option>微信</option><option>支付宝</option>
@@ -805,7 +809,11 @@ async function openSettleDetail(oid) {
             </select></div>
         </div>
         <div class="form-group"><label>备注</label><input type="text" class="input" id="payRemark" placeholder="可选"></div>
-        <button class="btn btn-success" onclick="submitPayment()">✔ 确认收款</button>
+        <button class="btn btn-success" onclick="submitPayment(${unpaid})">✔ 确认收款</button>
+      </div>`;
+    } else {
+      html += `<div class="detail-section"><h4>➕ 添加收款</h4>
+        <div class="alert alert-success">✅ 该工单已全部结清，无需继续收款</div>
       </div>`;
     }
 
@@ -867,17 +875,20 @@ async function openSettleDetail(oid) {
   } catch (e) { showAlert(e.error || '加载结算单失败'); }
 }
 
-async function submitPayment() {
+async function submitPayment(maxUnpaid) {
   const amount = parseFloat(document.getElementById('payAmount').value);
   const method = document.getElementById('payMethod').value;
   const remark = document.getElementById('payRemark').value;
   if (!amount || amount <= 0) return showAlert('请输入有效金额');
+  if (maxUnpaid !== undefined && amount > maxUnpaid + 0.01) {
+    return showAlert(`收款金额 ¥${amount.toFixed(2)} 超过欠款 ¥${maxUnpaid.toFixed(2)}`);
+  }
   try {
-    await api(`/settlements/${currentSettleOrderId}/pay`, {
+    const result = await api(`/settlements/${currentSettleOrderId}/pay`, {
       method: 'POST',
       body: JSON.stringify({ amount, payment_method: method, remark })
     });
-    showAlert(`成功收款 ¥${amount.toFixed(2)}`, 'success');
+    showAlert(`成功收款 ¥${amount.toFixed(2)}${result.just_fully_paid ? '，工单已全部结清，配件库存已扣减' : ''}`, 'success');
     openSettleDetail(currentSettleOrderId);
     loadSettlements();
     loadOrders();
